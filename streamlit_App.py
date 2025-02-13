@@ -1,5 +1,5 @@
 import streamlit as st
-from PyPDF2 import PdfReader
+import pdfplumber
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import google.generativeai as genai
@@ -11,68 +11,102 @@ import os
 
 st.set_page_config(page_title="Document Genie", layout="wide")
 
-# This is the first API key input; no need to repeat it in the main function.
-# api_key = st.text_input("Enter your Google API Key:", type="password", key="api_key_input")
-api_key = ""         # add api key here
+# API Key Handling - Get from user input or environment variable
+api_key = st.sidebar.text_input("Enter your Google API Key:", type="password")
+if not api_key:
+    st.warning("Please enter a valid API key.")
 
 def get_pdf_text(pdf_docs):
+    """Extracts text from PDFs using pdfplumber."""
     text = ""
     for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
+        with pdfplumber.open(pdf) as pdf_reader:
+            for page in pdf_reader.pages:
+                text += page.extract_text() or ""  # Handle NoneType
+    return text.strip()  # Remove extra spaces
+
+def summarize_text(text, api_key):
+    """Generates a brief summary of the document using Gemini-Pro."""
+    if not text:
+        return "Unable to extract meaningful text from the document."
+    
+    model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key)
+    prompt = f"Summarize the following document in a few sentences:\n\n{text[:5000]}"  # Limit input to first 5000 chars
+    response = model.invoke(prompt)
+    return response.content if response else "Summary generation failed."
 
 def get_text_chunks(text):
+    """Splits extracted text into smaller chunks for better processing."""
+    if not text:
+        st.error("No text extracted from PDFs. Please check your files.")
+        return []
+    
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
-    chunks = text_splitter.split_text(text)
-    return chunks
+    return text_splitter.split_text(text)
 
 def get_vector_store(text_chunks, api_key):
+    """Embeds text chunks and stores them in FAISS for retrieval."""
+    if not text_chunks:
+        st.error("No valid text chunks to process.")
+        return
+    
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
 
-def get_conversational_chain():
+def get_conversational_chain(api_key):
+    """Creates a conversation chain with a custom prompt."""
     prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details, if the answer is not in
-    provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
-    Context:\n {context}?\n
+    Answer the question as detailed as possible from the provided context. 
+    If the answer is not available, reply: 'Answer is not available in the context.' 
+    Do not make up an answer.
+
+    Context:\n {context}\n
     Question: \n{question}\n
 
     Answer:
     """
     model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.3, google_api_key=api_key)
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    return chain
+    return load_qa_chain(model, chain_type="stuff", prompt=prompt)
 
 def user_input(user_question, api_key):
+    """Handles user queries by searching the vector store and generating responses."""
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-    # new_db = FAISS.load_local("faiss_index", embeddings)
-    new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    docs = new_db.similarity_search(user_question)
-    chain = get_conversational_chain()
-    response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-    st.write("Reply: ", response["output_text"])
+    
+    try:
+        new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        docs = new_db.similarity_search(user_question)
+        chain = get_conversational_chain(api_key)
+        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
+        st.write("Reply:", response["output_text"])
+    except Exception as e:
+        st.error(f"Error processing request: {e}")
 
 def main():
-    st.header("Document chatbot")
-
-    user_question = st.text_input("Ask a Question from the PDF Files", key="user_question")
-
-    if user_question and api_key:  # Ensure API key and user question are provided
+    """Main Streamlit app logic."""
+    st.header("📄 Document Chatbot")
+    
+    user_question = st.text_input("🔍 Ask a question from the PDF files:", key="user_question")
+    
+    if user_question and api_key:
         user_input(user_question, api_key)
-
+    
     with st.sidebar:
-        st.title("Menu:")
-        pdf_docs = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button", accept_multiple_files=True, key="pdf_uploader")
-        if st.button("Submit & Process", key="process_button") and api_key:  # Check if API key is provided before processing
-            with st.spinner("Processing..."):
-                raw_text = get_pdf_text(pdf_docs)
+        st.title("📌 Menu")
+        pdf_docs = st.file_uploader("📂 Upload your PDF files:", accept_multiple_files=True, key="pdf_uploader")
+        
+        if pdf_docs:
+            raw_text = get_pdf_text(pdf_docs)
+            summary = summarize_text(raw_text, api_key)
+            st.markdown("### 📜 Document Summary:")
+            st.info(summary)
+
+        if st.button("🚀 Submit & Process") and api_key:
+            with st.spinner("🔄 Processing..."):
                 text_chunks = get_text_chunks(raw_text)
                 get_vector_store(text_chunks, api_key)
-                st.success("Done")
+                st.success("✅ Processing complete!")
 
 if __name__ == "__main__":
     main()
