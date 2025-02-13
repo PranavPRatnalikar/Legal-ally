@@ -12,7 +12,8 @@ import os
 st.set_page_config(page_title="Document Genie", layout="wide")
 
 # This is the first API key input; no need to repeat it in the main function.
-api_key = st.text_input("Enter your Google API Key:", type="password", key="api_key_input")
+# api_key = st.text_input("Enter your Google API Key:", type="password", key="api_key_input")
+api_key = ""         # add api key here
 
 def get_pdf_text(pdf_docs):
     text = ""
